@@ -1,0 +1,130 @@
+OS HW2 README 
+--------------
+Submitted by : Bharathkrishna Guruvayoor Murali (110945903)
+
+
+Steps to start
+----------------
+
+INSTALL AND MOUNT: 
+------------------
+	 1. Set CONFIG_TR_FS=m in the .config file and run make command. (This change is already made in .config file submitted in the assignment).
+	 Make command can be issued in the fs/trfs directory as well, to make the trfs module.
+	 2. From hw2-bguruvayoorm directory, run 
+	 				insmod fs/trfs/trfs.ko
+	 3. Create a mount point /some/lower/path
+	 4. Mount the file system using
+	 	 mount -t trfs -o tfile=/tmp/tfile1.txt /some/lower/path /mnt/trfs
+	 	 		(where tfile is the trace file where operations will be logged)
+
+	 5. cd /mnt/trfs and normal perform operations/file system commands.
+
+	
+
+
+TRFS DESIGN DECISIONS
+-----------------
+
+	-- Designed on top of the WRAPFS code copied to trfs directory.
+	-- Operations traced : readdir, open, read, write, close, rename, link, unlink, mkdir, rmdir
+	-- Logging information added to superblock void private pointer.
+				-- Logging operations use the structure trace_info
+	-- Structure 'record' created to hold the record entries that are filled in each operation traced				
+	-- Sequentially increasing unique 'id' for each record maintained
+	
+	Locking semantics
+	------------------
+	Mutex lock used to protect the increment of record id, as well as logging the records to trace file.
+	-- Mutex used because there is write operation to trace file (I/O).
+	-- The lock is defined in the super block private void pointer.
+	-- The trace operations can be called in multiple ways, as explained in efficiency part of README.
+		The mutex lock ensures sequential logging and prevents race conditions in all the cases.
+
+
+	Efficiency
+	----------
+
+	#1 Using buffer to reduce number of vfs_write calls
+		The records are copied on to a buffer (defined in trace_info) until it gets filled.
+		The buffer is written into the trace file using vfs_write, only when the buffer is known to overflow on copying the current record.
+
+	#2 Special handling for reads and writes
+		The read and write operations involve tracing of user buffer (with read/write data). This buffer can be huge, hence copying it to the buffer used to trace is a big waste of space. 
+		My design choice considers the trade off between I/O (for vfs_write) and extra-space (in case of read/write of huge files), and both cases are handled efficiently. It is as follows :
+
+				-- if the file is large (ie. record size will be greater than 2*PAGE_SIZE), flush the contents of the current buffer to trace file, and directly write the user read/write buffer to the trace file.
+
+				-- if the file is small, we need not do this costly I/O operation unnecessarily. Hence, it follows normal copying of the user buffer to the records buffer, and does not incur a vfs_write immediately.
+
+	#3 Usage of workqueue
+		The workqueue is used to have all the logging part done asynchronously. The operations will simply create the record and submit it to work queue and move on, so that workqueue will handle the other steps such as  filling of the record buffer and writing to the file if buffer is full.
+
+	#4 Usage of kernel thread
+		As the mechanism used writes to trace file only after record buffer is full, sometimes the partially filled buffer can remain not copied to trace file for a long time (mainly, the last chunk of buffer may remain until unmount time).
+		To solve this problem, an async kthread is used to copy the contents of buffer(if it is not empty), to the trace file.
+		The thread starts execution on mount time and is destroyed when unmounted.
+
+
+
+Replaying the traced operations
+--------------------------------
+
+The program treplay.c to replay the operations is present in /usr/src/hw-bguruvayoorm/hw2/ folder.
+
+The replay can be done as :
+
+	./treplay [-ns] TFILE
+-n: show what records will be replayed but don't replay them
+-s: strict mode -- abort replaying as soon as a deviation occurs
+Default - replays all operations even when deviation occurs
+
+Setting the bitmap using ioctl call
+--------------------------------------
+
+The program trctl.c to set the bitmap is present in /usr/src/hw-bguruvayoorm/hw2/folder
+
+A bitmap can be passed to the trctl, which will set the bitmap in trfs accordingly.
+
+USAGE TYPE 1
+------------
+
+./trctl CMD /mounted/path
+
+	 CMD can be:
+"all": to enable tracing for all f/s methods
+"none": to disable tracing for all f/s methods
+0xNN: hex number to pass bitmap of methods to trace or not
+
+Operation    Bit position to be set (starting from LSB, LSB = 1)
+----------   --------------------------------------------
+	readdir		1
+	open 		2
+	read 		3
+	write 		4
+	close 		5
+	mkdir 		6
+	unlink  	7
+	link		8
+	rename		9
+	rmdir		10
+
+For example, 0x04 - (binary 100) will set the 3rd bit from LSB, ie. the read operation
+Default - "all" mode ie. all operations will be traced
+
+
+USAGE TYPE 2
+-------------
+
+./trctl /mounted/path
+
+The currently set bitmap in trfs is returned and displayed
+
+
+
+REFERENCES
+----------
+Linux source code - http://free-electrons.com/
+Linux workqueues - http://www.tune2wizard.com/kernel-programming-workqueue/
+Linux kthreads explanation - https://sysplay.in/blog/tag/kernel-threads/
+ecryptfs - for parsing mount options
+ioctl explanation- http://www.tldp.org/LDP/lkmpg/2.4/html/x856.html
